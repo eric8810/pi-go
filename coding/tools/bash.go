@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"agentsdk/agent"
-	"agentsdk/ai"
+	"pi-go/agent"
+	"pi-go/ai"
 )
 
 const (

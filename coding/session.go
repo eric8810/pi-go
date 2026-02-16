@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"agentsdk/ai"
+	"pi-go/ai"
 )
 
 // SessionEntry is a single entry in the session JSONL file.

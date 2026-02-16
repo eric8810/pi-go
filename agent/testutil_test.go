@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"agentsdk/ai"
+	"pi-go/ai"
 )
 
 // testModel returns a Model suitable for testing.

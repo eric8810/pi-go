@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"agentsdk/ai"
+	"pi-go/ai"
 )
 
 // Agent is a stateful wrapper around the agent loop with pub/sub events,

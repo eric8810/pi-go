@@ -1,6 +1,6 @@
 package tools
 
-import "agentsdk/agent"
+import "pi-go/agent"
 
 // CodingTools returns the default coding tool set (read, bash, edit, write).
 func CodingTools(cwd string) []agent.AgentTool {

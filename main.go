@@ -9,12 +9,12 @@ import (
 	"strings"
 	"syscall"
 
-	"agentsdk/ai"
-	"agentsdk/coding"
+	"pi-go/ai"
+	"pi-go/coding"
 
 	// Register providers
-	_ "agentsdk/ai/providers/anthropic"
-	_ "agentsdk/ai/providers/openai"
+	_ "pi-go/ai/providers/anthropic"
+	_ "pi-go/ai/providers/openai"
 )
 
 const version = "0.1.0"

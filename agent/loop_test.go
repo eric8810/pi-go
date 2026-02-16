@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"agentsdk/ai"
+	"pi-go/ai"
 )
 
 func TestRunLoop_SimpleTextResponse(t *testing.T) {

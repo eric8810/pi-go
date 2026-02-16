@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"agentsdk/ai"
+	"pi-go/ai"
 )
 
 func TestNewSessionManager_CreatesDirectory(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"agentsdk/agent"
-	"agentsdk/ai"
+	"pi-go/agent"
+	"pi-go/ai"
 )
 
 // LsTool lists directory contents.

@@ -1,6 +1,6 @@
 .PHONY: build test clean install lint
 
-BINARY := agentsdk
+BINARY := pi-go
 VERSION := 0.1.0
 
 build:

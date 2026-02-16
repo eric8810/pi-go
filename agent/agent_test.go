@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"agentsdk/ai"
+	"pi-go/ai"
 )
 
 func TestNew_InitialState(t *testing.T) {

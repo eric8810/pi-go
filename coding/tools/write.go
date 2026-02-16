@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"agentsdk/agent"
-	"agentsdk/ai"
+	"pi-go/agent"
+	"pi-go/ai"
 )
 
 // WriteTool creates or overwrites files.

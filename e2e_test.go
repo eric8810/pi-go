@@ -8,10 +8,10 @@ import (
 	"sync"
 	"testing"
 
-	"agentsdk/agent"
-	"agentsdk/ai"
-	"agentsdk/coding"
-	"agentsdk/coding/tools"
+	"pi-go/agent"
+	"pi-go/ai"
+	"pi-go/coding"
+	"pi-go/coding/tools"
 )
 
 // testModel returns a model for e2e testing.

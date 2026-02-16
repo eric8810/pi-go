@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"agentsdk/agent"
-	"agentsdk/ai"
+	"pi-go/agent"
+	"pi-go/ai"
 )
 
 // EditTool performs surgical find-and-replace edits on files.

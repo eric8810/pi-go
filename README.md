@@ -1,4 +1,4 @@
-# agentsdk
+# pi-go
 
 A Go SDK for building AI coding agents with multi-provider support.
 
@@ -14,15 +14,15 @@ A Go SDK for building AI coding agents with multi-provider support.
 ## Installation
 
 ```bash
-go install agentsdk@latest
+go install pi-go@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/yourusername/agentsdk.git
-cd agentsdk
-go build -o agentsdk .
+git clone https://github.com/yourusername/pi-go.git
+cd pi-go
+go build -o pi-go .
 ```
 
 ## Usage
@@ -30,16 +30,16 @@ go build -o agentsdk .
 ### Interactive Mode
 
 ```bash
-agentsdk                                    # Auto-detect provider from env
-agentsdk --model gpt-4o                     # Use specific model
-agentsdk --provider anthropic               # Use specific provider
+pi-go                                    # Auto-detect provider from env
+pi-go --model gpt-4o                     # Use specific model
+pi-go --provider anthropic               # Use specific provider
 ```
 
 ### Print Mode (Non-interactive)
 
 ```bash
-agentsdk -p "explain this codebase"
-agentsdk --print "fix the bug in main.go"
+pi-go -p "explain this codebase"
+pi-go --print "fix the bug in main.go"
 ```
 
 ### Flags
@@ -94,8 +94,8 @@ import (
     "context"
     "fmt"
     
-    "agentsdk/ai"
-    "agentsdk/agent"
+    "pi-go/ai"
+    "pi-go/agent"
 )
 
 func main() {
@@ -113,7 +113,7 @@ func main() {
 ## Project Structure
 
 ```
-agentsdk/
+pi-go/
 ├── agent/          # Core agent loop and types
 ├── ai/             # AI provider abstractions
 │   └── providers/  # Provider implementations
@@ -134,7 +134,7 @@ go test ./...
 go vet ./...
 
 # Build
-go build -o agentsdk .
+go build -o pi-go .
 ```
 
 ## Contributing

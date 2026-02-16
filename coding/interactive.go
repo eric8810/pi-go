@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"agentsdk/agent"
-	"agentsdk/ai"
-	"agentsdk/coding/tools"
-	"agentsdk/tui"
+	"pi-go/agent"
+	"pi-go/ai"
+	"pi-go/coding/tools"
+	"pi-go/tui"
 )
 
 // InteractiveConfig configures the interactive coding agent.

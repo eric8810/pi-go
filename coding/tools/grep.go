@@ -9,8 +9,8 @@ import (
 	"regexp"
 	"strings"
 
-	"agentsdk/agent"
-	"agentsdk/ai"
+	"pi-go/agent"
+	"pi-go/ai"
 )
 
 const maxGrepResults = 200
