@@ -133,6 +133,16 @@ const (
 	SteeringAll SteeringMode = "all"
 )
 
+// FollowUpMode controls how follow-up messages are delivered after a turn completes.
+type FollowUpMode string
+
+const (
+	// FollowUpOneAtATime delivers one follow-up message per turn, triggering a new turn for each.
+	FollowUpOneAtATime FollowUpMode = "one-at-a-time"
+	// FollowUpAll delivers all queued follow-up messages at once (default).
+	FollowUpAll FollowUpMode = "all"
+)
+
 // ToolCallAction determines the outcome of a BeforeToolCall hook.
 type ToolCallAction string
 
@@ -182,6 +192,10 @@ type Config struct {
 
 	// SteeringMode controls how steering messages are delivered.
 	SteeringMode SteeringMode
+
+	// FollowUpMode controls how follow-up messages are delivered after a turn completes.
+	// Defaults to FollowUpAll.
+	FollowUpMode FollowUpMode
 
 	// ConvertToLLM transforms agent messages to LLM-compatible messages.
 	// If nil, messages are passed through directly.
