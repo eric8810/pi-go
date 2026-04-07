@@ -20,6 +20,16 @@ type AgentTool struct {
 	// It receives the tool call ID, parsed arguments, a context for cancellation,
 	// and an optional update callback for streaming partial results.
 	Execute func(ctx context.Context, toolCallID string, params map[string]any, onUpdate UpdateCallback) (*ToolResult, error)
+
+	// BeforeExecute is called before this tool executes.
+	// Runs after the global Config.BeforeToolCall hook.
+	// Return nil to allow execution with original args.
+	BeforeExecute func(ctx context.Context, toolCallID string, args map[string]any) (*BeforeToolCallResult, error)
+
+	// AfterExecute is called after this tool executes and can transform the result.
+	// Runs before the global Config.AfterToolCall hook.
+	// Return nil to keep the result unchanged.
+	AfterExecute func(ctx context.Context, toolCallID string, args map[string]any, result *ToolResult) (*ToolResult, error)
 }
 
 // UpdateCallback is called during tool execution to report partial progress.
@@ -123,6 +133,46 @@ const (
 	SteeringAll SteeringMode = "all"
 )
 
+// FollowUpMode controls how follow-up messages are delivered after a turn completes.
+type FollowUpMode string
+
+const (
+	// FollowUpOneAtATime delivers one follow-up message per turn, triggering a new turn for each.
+	FollowUpOneAtATime FollowUpMode = "one-at-a-time"
+	// FollowUpAll delivers all queued follow-up messages at once (default).
+	FollowUpAll FollowUpMode = "all"
+)
+
+// ToolCallAction determines the outcome of a BeforeToolCall hook.
+type ToolCallAction string
+
+const (
+	// ToolCallAllow allows the tool to execute normally.
+	ToolCallAllow ToolCallAction = "allow"
+	// ToolCallDeny blocks execution and returns DenyResult to the LLM.
+	ToolCallDeny ToolCallAction = "deny"
+	// ToolCallProvideResult skips execution and returns ProvidedResult to the LLM directly.
+	ToolCallProvideResult ToolCallAction = "provide_result"
+)
+
+// BeforeToolCallResult is returned by BeforeToolCall hooks to control execution.
+type BeforeToolCallResult struct {
+	// Action determines what happens next. Zero value is treated as ToolCallAllow.
+	Action ToolCallAction
+
+	// DenyResult is returned to the LLM when Action is ToolCallDeny.
+	// If nil, a generic denial message is used.
+	DenyResult *ToolResult
+
+	// ProvidedResult is returned to the LLM when Action is ToolCallProvideResult,
+	// bypassing actual tool execution.
+	ProvidedResult *ToolResult
+
+	// ReplaceArgs replaces the tool arguments before execution.
+	// Only applied when Action is ToolCallAllow.
+	ReplaceArgs map[string]any
+}
+
 // Config configures the agent loop.
 type Config struct {
 	// Model is the LLM to use.
@@ -143,6 +193,10 @@ type Config struct {
 	// SteeringMode controls how steering messages are delivered.
 	SteeringMode SteeringMode
 
+	// FollowUpMode controls how follow-up messages are delivered after a turn completes.
+	// Defaults to FollowUpAll.
+	FollowUpMode FollowUpMode
+
 	// ConvertToLLM transforms agent messages to LLM-compatible messages.
 	// If nil, messages are passed through directly.
 	ConvertToLLM func(messages []ai.Message) []ai.Message
@@ -158,6 +212,16 @@ type Config struct {
 	// GetFollowUpMessages returns messages to inject after the agent completes a turn.
 	// Returns nil when no follow-up is needed.
 	GetFollowUpMessages func() []ai.Message
+
+	// BeforeToolCall is called before any tool executes.
+	// Runs before the per-tool BeforeExecute hook.
+	// Return nil to allow execution with original args.
+	BeforeToolCall func(ctx context.Context, toolCallID string, toolName string, args map[string]any) (*BeforeToolCallResult, error)
+
+	// AfterToolCall is called after any tool executes and can transform the result.
+	// Runs after the per-tool AfterExecute hook.
+	// Return nil to keep the result unchanged.
+	AfterToolCall func(ctx context.Context, toolCallID string, toolName string, args map[string]any, result *ToolResult) (*ToolResult, error)
 
 	// MaxTurns limits the number of LLM round-trips. 0 means unlimited.
 	MaxTurns int

@@ -260,6 +260,49 @@ func (a *Agent) IsIdle() bool {
 	return a.idle
 }
 
+// ClearSteeringQueue discards all pending steering messages.
+func (a *Agent) ClearSteeringQueue() {
+	a.steeringMu.Lock()
+	defer a.steeringMu.Unlock()
+	a.steeringQueue = nil
+}
+
+// ClearFollowUpQueue discards all pending follow-up messages.
+func (a *Agent) ClearFollowUpQueue() {
+	a.followUpMu.Lock()
+	defer a.followUpMu.Unlock()
+	a.followUpQueue = nil
+}
+
+// ClearAllQueues discards all pending steering and follow-up messages.
+func (a *Agent) ClearAllQueues() {
+	a.ClearSteeringQueue()
+	a.ClearFollowUpQueue()
+}
+
+// Reset clears the message history. Configuration (model, tools, system prompt) is preserved.
+func (a *Agent) Reset() {
+	a.mu.Lock()
+	a.state.Messages = nil
+	a.mu.Unlock()
+	a.ClearAllQueues()
+}
+
+// ReplaceMessages replaces the entire message history with the provided messages.
+func (a *Agent) ReplaceMessages(msgs []ai.Message) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.state.Messages = make([]ai.Message, len(msgs))
+	copy(a.state.Messages, msgs)
+}
+
+// AppendMessage appends a single message to the history without triggering the agent loop.
+func (a *Agent) AppendMessage(msg ai.Message) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.state.Messages = append(a.state.Messages, msg)
+}
+
 // drainSteering returns and clears all queued steering messages.
 func (a *Agent) drainSteering() []ai.Message {
 	a.steeringMu.Lock()
@@ -281,7 +324,7 @@ func (a *Agent) drainSteering() []ai.Message {
 	}
 }
 
-// drainFollowUps returns and clears all queued follow-up messages.
+// drainFollowUps returns and clears queued follow-up messages according to FollowUpMode.
 func (a *Agent) drainFollowUps() []ai.Message {
 	a.followUpMu.Lock()
 	defer a.followUpMu.Unlock()
@@ -290,7 +333,14 @@ func (a *Agent) drainFollowUps() []ai.Message {
 		return nil
 	}
 
-	msgs := a.followUpQueue
-	a.followUpQueue = nil
-	return msgs
+	switch a.config.FollowUpMode {
+	case FollowUpOneAtATime:
+		msg := a.followUpQueue[0]
+		a.followUpQueue = a.followUpQueue[1:]
+		return []ai.Message{msg}
+	default: // FollowUpAll
+		msgs := a.followUpQueue
+		a.followUpQueue = nil
+		return msgs
+	}
 }

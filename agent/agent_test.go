@@ -1125,3 +1125,365 @@ func TestGetState_ToolsAreCopied(t *testing.T) {
 		t.Errorf("modifying state snapshot affected agent internal state: %d vs %d", len(state2.Tools), originalLen)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// P1: New API method tests
+// ---------------------------------------------------------------------------
+
+func TestClearSteeringQueue(t *testing.T) {
+	a := New(Config{Model: testModel(), StreamFunc: mockStreamFn(textResponse("ok"))})
+	a.SteerText("msg1")
+	a.SteerText("msg2")
+	a.ClearSteeringQueue()
+
+	drained := a.drainSteering()
+	if len(drained) != 0 {
+		t.Errorf("expected empty queue after ClearSteeringQueue, got %d messages", len(drained))
+	}
+}
+
+func TestClearFollowUpQueue(t *testing.T) {
+	a := New(Config{Model: testModel(), StreamFunc: mockStreamFn(textResponse("ok"))})
+	a.FollowUpText("fu1")
+	a.FollowUpText("fu2")
+	a.ClearFollowUpQueue()
+
+	drained := a.drainFollowUps()
+	if len(drained) != 0 {
+		t.Errorf("expected empty queue after ClearFollowUpQueue, got %d messages", len(drained))
+	}
+}
+
+func TestClearAllQueues(t *testing.T) {
+	a := New(Config{Model: testModel(), StreamFunc: mockStreamFn(textResponse("ok"))})
+	a.SteerText("s1")
+	a.FollowUpText("f1")
+	a.ClearAllQueues()
+
+	if d := a.drainSteering(); len(d) != 0 {
+		t.Errorf("expected empty steering queue, got %d", len(d))
+	}
+	if d := a.drainFollowUps(); len(d) != 0 {
+		t.Errorf("expected empty followup queue, got %d", len(d))
+	}
+}
+
+func TestReset_ClearsMessages(t *testing.T) {
+	cfg := Config{
+		Model:      testModel(),
+		StreamFunc: mockStreamFn(textResponse("hello")),
+	}
+	a := New(cfg)
+	_, err := a.Prompt(context.Background(), "Hi")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(a.Messages()) == 0 {
+		t.Fatal("expected messages before reset")
+	}
+
+	a.Reset()
+
+	if len(a.Messages()) != 0 {
+		t.Errorf("expected empty messages after Reset, got %d", len(a.Messages()))
+	}
+}
+
+func TestReset_ClearsQueues(t *testing.T) {
+	a := New(Config{Model: testModel(), StreamFunc: mockStreamFn(textResponse("ok"))})
+	a.SteerText("s1")
+	a.FollowUpText("f1")
+	a.Reset()
+
+	if d := a.drainSteering(); len(d) != 0 {
+		t.Errorf("expected empty steering queue after Reset, got %d", len(d))
+	}
+	if d := a.drainFollowUps(); len(d) != 0 {
+		t.Errorf("expected empty followup queue after Reset, got %d", len(d))
+	}
+}
+
+func TestReset_PreservesConfig(t *testing.T) {
+	cfg := Config{
+		Model:        testModel(),
+		SystemPrompt: "You are helpful",
+		StreamFunc:   mockStreamFn(textResponse("ok")),
+	}
+	a := New(cfg)
+	a.Reset()
+
+	state := a.GetState()
+	if state.SystemPrompt != "You are helpful" {
+		t.Errorf("Reset should preserve SystemPrompt, got %q", state.SystemPrompt)
+	}
+	if state.Model == nil || state.Model.ID != "test-model" {
+		t.Errorf("Reset should preserve Model, got %v", state.Model)
+	}
+}
+
+func TestReplaceMessages(t *testing.T) {
+	cfg := Config{
+		Model:      testModel(),
+		StreamFunc: mockStreamFn(textResponse("hello")),
+	}
+	a := New(cfg)
+	_, err := a.Prompt(context.Background(), "original")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	replacement := []ai.Message{
+		ai.NewUserMessage("new message"),
+	}
+	a.ReplaceMessages(replacement)
+
+	msgs := a.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message after ReplaceMessages, got %d", len(msgs))
+	}
+	um, ok := msgs[0].(*ai.UserMessage)
+	if !ok {
+		t.Fatalf("expected UserMessage, got %T", msgs[0])
+	}
+	if um.Content[0].Text != "new message" {
+		t.Errorf("expected 'new message', got %q", um.Content[0].Text)
+	}
+}
+
+func TestReplaceMessages_IsolatesSlice(t *testing.T) {
+	a := New(Config{Model: testModel(), StreamFunc: mockStreamFn(textResponse("ok"))})
+	original := []ai.Message{ai.NewUserMessage("a")}
+	a.ReplaceMessages(original)
+
+	// Mutating the original slice should not affect agent state
+	original[0] = ai.NewUserMessage("mutated")
+	msgs := a.Messages()
+	um, ok := msgs[0].(*ai.UserMessage)
+	if !ok {
+		t.Fatalf("expected UserMessage, got %T", msgs[0])
+	}
+	if um.Content[0].Text != "a" {
+		t.Errorf("ReplaceMessages should copy the slice, but external mutation affected agent: %q", um.Content[0].Text)
+	}
+}
+
+func TestAppendMessage(t *testing.T) {
+	a := New(Config{Model: testModel(), StreamFunc: mockStreamFn(textResponse("ok"))})
+	a.AppendMessage(ai.NewUserMessage("injected"))
+
+	msgs := a.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	um, ok := msgs[0].(*ai.UserMessage)
+	if !ok {
+		t.Fatalf("expected UserMessage, got %T", msgs[0])
+	}
+	if um.Content[0].Text != "injected" {
+		t.Errorf("expected 'injected', got %q", um.Content[0].Text)
+	}
+}
+
+func TestFollowUpMode_OneAtATime(t *testing.T) {
+	callCount := 0
+	streamFn := func(ctx context.Context, model *ai.Model, reqCtx *ai.Context, opts ai.StreamOptions) *ai.EventStream {
+		callCount++
+		return mockStreamFn(textResponse("ok"))(ctx, model, reqCtx, opts)
+	}
+
+	cfg := Config{
+		Model:        testModel(),
+		StreamFunc:   streamFn,
+		FollowUpMode: FollowUpOneAtATime,
+	}
+	a := New(cfg)
+	// Queue two follow-ups before prompting
+	a.FollowUpText("followup-1")
+	a.FollowUpText("followup-2")
+
+	_, err := a.Prompt(context.Background(), "start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// With FollowUpOneAtATime: initial turn + 2 follow-up turns = 3 LLM calls
+	if callCount != 3 {
+		t.Errorf("expected 3 LLM calls with FollowUpOneAtATime, got %d", callCount)
+	}
+}
+
+func TestFollowUpMode_All(t *testing.T) {
+	callCount := 0
+	streamFn := func(ctx context.Context, model *ai.Model, reqCtx *ai.Context, opts ai.StreamOptions) *ai.EventStream {
+		callCount++
+		return mockStreamFn(textResponse("ok"))(ctx, model, reqCtx, opts)
+	}
+
+	cfg := Config{
+		Model:        testModel(),
+		StreamFunc:   streamFn,
+		FollowUpMode: FollowUpAll, // explicit
+	}
+	a := New(cfg)
+	a.FollowUpText("followup-1")
+	a.FollowUpText("followup-2")
+
+	_, err := a.Prompt(context.Background(), "start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// With FollowUpAll: initial turn + 1 follow-up turn (all follow-ups delivered at once) = 2 LLM calls
+	if callCount != 2 {
+		t.Errorf("expected 2 LLM calls with FollowUpAll, got %d", callCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P1: Concurrency tests
+// ---------------------------------------------------------------------------
+
+func TestSteer_DuringExecution(t *testing.T) {
+	// Steer() called while agent is running should inject at next tool boundary.
+	started := make(chan struct{})
+	resumed := make(chan struct{})
+
+	tool := AgentTool{
+		Tool: ai.Tool{Name: "slow"},
+		Execute: func(ctx context.Context, toolCallID string, params map[string]any, onUpdate UpdateCallback) (*ToolResult, error) {
+			close(started)  // signal tool is executing
+			<-resumed       // wait before returning
+			return TextResult("slow done"), nil
+		},
+	}
+
+	streamFn := mockStreamFn(
+		toolCallResponse(ai.ToolCallBlock("tc1", "slow", map[string]any{})),
+		textResponse("final"),
+	)
+
+	cfg := Config{
+		Model:      testModel(),
+		Tools:      []AgentTool{tool},
+		StreamFunc: streamFn,
+	}
+	a := New(cfg)
+
+	done := make(chan []ai.Message, 1)
+	go func() {
+		msgs, _ := a.Prompt(context.Background(), "start")
+		done <- msgs
+	}()
+
+	<-started // wait until tool is executing
+	a.SteerText("steer-during-exec")
+	close(resumed) // let tool finish
+
+	msgs := <-done
+	// Find the steering message in the result
+	found := false
+	for _, m := range msgs {
+		if um, ok := m.(*ai.UserMessage); ok && um.Content[0].Text == "steer-during-exec" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected steering message to appear in final history")
+	}
+}
+
+func TestFollowUp_DuringExecution(t *testing.T) {
+	// FollowUp() called while agent runs should trigger an additional turn.
+	started := make(chan struct{})
+	resumed := make(chan struct{})
+
+	tool := AgentTool{
+		Tool: ai.Tool{Name: "slow"},
+		Execute: func(ctx context.Context, toolCallID string, params map[string]any, onUpdate UpdateCallback) (*ToolResult, error) {
+			close(started)
+			<-resumed
+			return TextResult("done"), nil
+		},
+	}
+
+	streamFn := mockStreamFn(
+		toolCallResponse(ai.ToolCallBlock("tc1", "slow", map[string]any{})),
+		textResponse("turn1-done"),
+		textResponse("turn2-done"), // for the follow-up turn
+	)
+
+	cfg := Config{
+		Model:      testModel(),
+		Tools:      []AgentTool{tool},
+		StreamFunc: streamFn,
+	}
+	a := New(cfg)
+
+	done := make(chan []ai.Message, 1)
+	go func() {
+		msgs, _ := a.Prompt(context.Background(), "start")
+		done <- msgs
+	}()
+
+	<-started
+	a.FollowUpText("followup-during-exec")
+	close(resumed)
+
+	msgs := <-done
+	found := false
+	for _, m := range msgs {
+		if um, ok := m.(*ai.UserMessage); ok && um.Content[0].Text == "followup-during-exec" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected follow-up message to appear in final history")
+	}
+}
+
+func TestConcurrentSteerAndAbort(t *testing.T) {
+	// Concurrent Steer + Abort should not panic or deadlock.
+	started := make(chan struct{})
+	tool := AgentTool{
+		Tool: ai.Tool{Name: "slow"},
+		Execute: func(ctx context.Context, toolCallID string, params map[string]any, onUpdate UpdateCallback) (*ToolResult, error) {
+			close(started)
+			<-ctx.Done()
+			return ErrorResult("aborted"), nil
+		},
+	}
+
+	streamFn := mockStreamFn(
+		toolCallResponse(ai.ToolCallBlock("tc1", "slow", map[string]any{})),
+		textResponse("done"),
+	)
+
+	cfg := Config{
+		Model:      testModel(),
+		Tools:      []AgentTool{tool},
+		StreamFunc: streamFn,
+	}
+	a := New(cfg)
+
+	done := make(chan struct{})
+	go func() {
+		a.Prompt(context.Background(), "start") //nolint
+		close(done)
+	}()
+
+	<-started
+	// Fire Steer and Abort concurrently — must not panic
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); a.SteerText("concurrent steer") }()
+	go func() { defer wg.Done(); a.Abort() }()
+	wg.Wait()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("agent did not finish after Abort — possible deadlock")
+	}
+}

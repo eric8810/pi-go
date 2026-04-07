@@ -1216,3 +1216,428 @@ func TestErrorResult(t *testing.T) {
 		t.Errorf("expected 'something went wrong', got %q", r.Content[0].Text)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// P1: BeforeToolCall / AfterToolCall hook tests
+// ---------------------------------------------------------------------------
+
+func TestBeforeToolCall_Allow(t *testing.T) {
+	var called []string
+	tool := echoTool("echo")
+	streamFn := mockStreamFn(
+		toolCallResponse(ai.ToolCallBlock("tc1", "echo", map[string]any{"input": "hi"})),
+		textResponse("done"),
+	)
+	cfg := &Config{
+		Model:      testModel(),
+		Tools:      []AgentTool{tool},
+		StreamFunc: streamFn,
+		BeforeToolCall: func(ctx context.Context, toolCallID, toolName string, args map[string]any) (*BeforeToolCallResult, error) {
+			called = append(called, toolName)
+			return nil, nil // allow
+		},
+	}
+	result, err := RunLoop(context.Background(), cfg, []ai.Message{ai.NewUserMessage("go")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(called) != 1 || called[0] != "echo" {
+		t.Errorf("expected BeforeToolCall to be called once with 'echo', got %v", called)
+	}
+	tr, ok := result[2].(*ai.ToolResultMessage)
+	if !ok {
+		t.Fatalf("expected ToolResultMessage at index 2, got %T", result[2])
+	}
+	if tr.IsError {
+		t.Error("expected non-error tool result when hook allows")
+	}
+	if len(tr.Content) == 0 || tr.Content[0].Text != "echo: hi" {
+		t.Errorf("expected 'echo: hi', got %v", tr.Content)
+	}
+}
+
+func TestBeforeToolCall_Deny(t *testing.T) {
+	tool := echoTool("echo")
+	streamFn := mockStreamFn(
+		toolCallResponse(ai.ToolCallBlock("tc1", "echo", map[string]any{"input": "hi"})),
+		textResponse("done"),
+	)
+	cfg := &Config{
+		Model:      testModel(),
+		Tools:      []AgentTool{tool},
+		StreamFunc: streamFn,
+		BeforeToolCall: func(ctx context.Context, toolCallID, toolName string, args map[string]any) (*BeforeToolCallResult, error) {
+			return &BeforeToolCallResult{
+				Action:     ToolCallDeny,
+				DenyResult: ErrorResult("not allowed: " + toolName),
+			}, nil
+		},
+	}
+	result, err := RunLoop(context.Background(), cfg, []ai.Message{ai.NewUserMessage("go")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tr, ok := result[2].(*ai.ToolResultMessage)
+	if !ok {
+		t.Fatalf("expected ToolResultMessage at index 2, got %T", result[2])
+	}
+	if !tr.IsError {
+		t.Error("expected IsError=true when hook denies")
+	}
+	if len(tr.Content) == 0 || tr.Content[0].Text != "not allowed: echo" {
+		t.Errorf("expected denial message, got %v", tr.Content)
+	}
+}
+
+func TestBeforeToolCall_DenyWithoutResult(t *testing.T) {
+	// Deny with nil DenyResult should fall back to a generic message.
+	tool := echoTool("echo")
+	streamFn := mockStreamFn(
+		toolCallResponse(ai.ToolCallBlock("tc1", "echo", map[string]any{"input": "x"})),
+		textResponse("done"),
+	)
+	cfg := &Config{
+		Model:      testModel(),
+		Tools:      []AgentTool{tool},
+		StreamFunc: streamFn,
+		BeforeToolCall: func(ctx context.Context, toolCallID, toolName string, args map[string]any) (*BeforeToolCallResult, error) {
+			return &BeforeToolCallResult{Action: ToolCallDeny}, nil
+		},
+	}
+	result, err := RunLoop(context.Background(), cfg, []ai.Message{ai.NewUserMessage("go")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tr, ok := result[2].(*ai.ToolResultMessage)
+	if !ok {
+		t.Fatalf("expected ToolResultMessage, got %T", result[2])
+	}
+	if !tr.IsError {
+		t.Error("expected IsError=true for deny with nil DenyResult")
+	}
+}
+
+func TestBeforeToolCall_ProvideResult(t *testing.T) {
+	var executed bool
+	tool := AgentTool{
+		Tool: ai.Tool{Name: "probe"},
+		Execute: func(ctx context.Context, toolCallID string, params map[string]any, onUpdate UpdateCallback) (*ToolResult, error) {
+			executed = true
+			return TextResult("real result"), nil
+		},
+	}
+	streamFn := mockStreamFn(
+		toolCallResponse(ai.ToolCallBlock("tc1", "probe", map[string]any{})),
+		textResponse("done"),
+	)
+	cfg := &Config{
+		Model:      testModel(),
+		Tools:      []AgentTool{tool},
+		StreamFunc: streamFn,
+		BeforeToolCall: func(ctx context.Context, toolCallID, toolName string, args map[string]any) (*BeforeToolCallResult, error) {
+			return &BeforeToolCallResult{
+				Action:         ToolCallProvideResult,
+				ProvidedResult: TextResult("injected result"),
+			}, nil
+		},
+	}
+	result, err := RunLoop(context.Background(), cfg, []ai.Message{ai.NewUserMessage("go")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if executed {
+		t.Error("expected tool.Execute NOT to be called when hook provides result")
+	}
+	tr, ok := result[2].(*ai.ToolResultMessage)
+	if !ok {
+		t.Fatalf("expected ToolResultMessage, got %T", result[2])
+	}
+	if len(tr.Content) == 0 || tr.Content[0].Text != "injected result" {
+		t.Errorf("expected 'injected result', got %v", tr.Content)
+	}
+}
+
+func TestBeforeToolCall_ReplaceArgs(t *testing.T) {
+	var capturedArgs map[string]any
+	tool := AgentTool{
+		Tool: ai.Tool{Name: "capture"},
+		Execute: func(ctx context.Context, toolCallID string, params map[string]any, onUpdate UpdateCallback) (*ToolResult, error) {
+			capturedArgs = params
+			return TextResult("ok"), nil
+		},
+	}
+	streamFn := mockStreamFn(
+		toolCallResponse(ai.ToolCallBlock("tc1", "capture", map[string]any{"input": "original"})),
+		textResponse("done"),
+	)
+	cfg := &Config{
+		Model:      testModel(),
+		Tools:      []AgentTool{tool},
+		StreamFunc: streamFn,
+		BeforeToolCall: func(ctx context.Context, toolCallID, toolName string, args map[string]any) (*BeforeToolCallResult, error) {
+			return &BeforeToolCallResult{
+				Action:      ToolCallAllow,
+				ReplaceArgs: map[string]any{"input": "replaced"},
+			}, nil
+		},
+	}
+	_, err := RunLoop(context.Background(), cfg, []ai.Message{ai.NewUserMessage("go")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedArgs["input"] != "replaced" {
+		t.Errorf("expected args to be replaced, got %v", capturedArgs)
+	}
+}
+
+func TestAfterToolCall_TransformResult(t *testing.T) {
+	tool := echoTool("echo")
+	streamFn := mockStreamFn(
+		toolCallResponse(ai.ToolCallBlock("tc1", "echo", map[string]any{"input": "hello"})),
+		textResponse("done"),
+	)
+	cfg := &Config{
+		Model:      testModel(),
+		Tools:      []AgentTool{tool},
+		StreamFunc: streamFn,
+		AfterToolCall: func(ctx context.Context, toolCallID, toolName string, args map[string]any, result *ToolResult) (*ToolResult, error) {
+			// Wrap the result
+			return TextResult("WRAPPED: " + result.Content[0].Text), nil
+		},
+	}
+	messages, err := RunLoop(context.Background(), cfg, []ai.Message{ai.NewUserMessage("go")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tr, ok := messages[2].(*ai.ToolResultMessage)
+	if !ok {
+		t.Fatalf("expected ToolResultMessage, got %T", messages[2])
+	}
+	if len(tr.Content) == 0 || tr.Content[0].Text != "WRAPPED: echo: hello" {
+		t.Errorf("expected 'WRAPPED: echo: hello', got %v", tr.Content)
+	}
+}
+
+func TestAfterToolCall_ReturnNilKeepsOriginal(t *testing.T) {
+	tool := echoTool("echo")
+	streamFn := mockStreamFn(
+		toolCallResponse(ai.ToolCallBlock("tc1", "echo", map[string]any{"input": "hi"})),
+		textResponse("done"),
+	)
+	cfg := &Config{
+		Model:      testModel(),
+		Tools:      []AgentTool{tool},
+		StreamFunc: streamFn,
+		AfterToolCall: func(ctx context.Context, toolCallID, toolName string, args map[string]any, result *ToolResult) (*ToolResult, error) {
+			return nil, nil // no transform
+		},
+	}
+	messages, err := RunLoop(context.Background(), cfg, []ai.Message{ai.NewUserMessage("go")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tr, ok := messages[2].(*ai.ToolResultMessage)
+	if !ok {
+		t.Fatalf("expected ToolResultMessage, got %T", messages[2])
+	}
+	if len(tr.Content) == 0 || tr.Content[0].Text != "echo: hi" {
+		t.Errorf("expected original 'echo: hi', got %v", tr.Content)
+	}
+}
+
+func TestPerToolBeforeExecute_Deny(t *testing.T) {
+	var globalCalled bool
+	tool := AgentTool{
+		Tool: ai.Tool{Name: "locked"},
+		Execute: func(ctx context.Context, toolCallID string, params map[string]any, onUpdate UpdateCallback) (*ToolResult, error) {
+			return TextResult("should not execute"), nil
+		},
+		BeforeExecute: func(ctx context.Context, toolCallID string, args map[string]any) (*BeforeToolCallResult, error) {
+			return &BeforeToolCallResult{
+				Action:     ToolCallDeny,
+				DenyResult: ErrorResult("per-tool denied"),
+			}, nil
+		},
+	}
+	streamFn := mockStreamFn(
+		toolCallResponse(ai.ToolCallBlock("tc1", "locked", map[string]any{})),
+		textResponse("done"),
+	)
+	cfg := &Config{
+		Model:      testModel(),
+		Tools:      []AgentTool{tool},
+		StreamFunc: streamFn,
+		BeforeToolCall: func(ctx context.Context, toolCallID, toolName string, args map[string]any) (*BeforeToolCallResult, error) {
+			globalCalled = true
+			return nil, nil // global allows
+		},
+	}
+	messages, err := RunLoop(context.Background(), cfg, []ai.Message{ai.NewUserMessage("go")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !globalCalled {
+		t.Error("expected global BeforeToolCall to be called before per-tool hook")
+	}
+	tr, ok := messages[2].(*ai.ToolResultMessage)
+	if !ok {
+		t.Fatalf("expected ToolResultMessage, got %T", messages[2])
+	}
+	if !tr.IsError || len(tr.Content) == 0 || tr.Content[0].Text != "per-tool denied" {
+		t.Errorf("expected per-tool denial, got %v (isError=%v)", tr.Content, tr.IsError)
+	}
+}
+
+func TestPerToolAfterExecute_Transform(t *testing.T) {
+	var globalAfterCalled bool
+	tool := AgentTool{
+		Tool: ai.Tool{Name: "transform"},
+		Execute: func(ctx context.Context, toolCallID string, params map[string]any, onUpdate UpdateCallback) (*ToolResult, error) {
+			return TextResult("raw"), nil
+		},
+		AfterExecute: func(ctx context.Context, toolCallID string, args map[string]any, result *ToolResult) (*ToolResult, error) {
+			return TextResult("per-tool: " + result.Content[0].Text), nil
+		},
+	}
+	streamFn := mockStreamFn(
+		toolCallResponse(ai.ToolCallBlock("tc1", "transform", map[string]any{})),
+		textResponse("done"),
+	)
+	cfg := &Config{
+		Model:      testModel(),
+		Tools:      []AgentTool{tool},
+		StreamFunc: streamFn,
+		AfterToolCall: func(ctx context.Context, toolCallID, toolName string, args map[string]any, result *ToolResult) (*ToolResult, error) {
+			globalAfterCalled = true
+			return TextResult("global: " + result.Content[0].Text), nil // runs after per-tool
+		},
+	}
+	messages, err := RunLoop(context.Background(), cfg, []ai.Message{ai.NewUserMessage("go")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !globalAfterCalled {
+		t.Error("expected global AfterToolCall to be called after per-tool hook")
+	}
+	tr, ok := messages[2].(*ai.ToolResultMessage)
+	if !ok {
+		t.Fatalf("expected ToolResultMessage, got %T", messages[2])
+	}
+	// Order: Execute → AfterExecute → AfterToolCall → result
+	// per-tool wraps "raw" → "per-tool: raw", then global wraps that → "global: per-tool: raw"
+	expected := "global: per-tool: raw"
+	if len(tr.Content) == 0 || tr.Content[0].Text != expected {
+		t.Errorf("expected %q, got %v", expected, tr.Content)
+	}
+}
+
+func TestBeforeToolCall_Error(t *testing.T) {
+	tool := echoTool("echo")
+	streamFn := mockStreamFn(
+		toolCallResponse(ai.ToolCallBlock("tc1", "echo", map[string]any{"input": "x"})),
+		textResponse("done"),
+	)
+	cfg := &Config{
+		Model:      testModel(),
+		Tools:      []AgentTool{tool},
+		StreamFunc: streamFn,
+		BeforeToolCall: func(ctx context.Context, toolCallID, toolName string, args map[string]any) (*BeforeToolCallResult, error) {
+			return nil, fmt.Errorf("hook failure")
+		},
+	}
+	messages, err := RunLoop(context.Background(), cfg, []ai.Message{ai.NewUserMessage("go")})
+	if err != nil {
+		t.Fatalf("unexpected loop error: %v", err)
+	}
+	tr, ok := messages[2].(*ai.ToolResultMessage)
+	if !ok {
+		t.Fatalf("expected ToolResultMessage, got %T", messages[2])
+	}
+	if !tr.IsError {
+		t.Error("expected IsError=true when BeforeToolCall returns error")
+	}
+}
+
+func TestAfterToolCall_Error(t *testing.T) {
+	tool := echoTool("echo")
+	streamFn := mockStreamFn(
+		toolCallResponse(ai.ToolCallBlock("tc1", "echo", map[string]any{"input": "x"})),
+		textResponse("done"),
+	)
+	cfg := &Config{
+		Model:      testModel(),
+		Tools:      []AgentTool{tool},
+		StreamFunc: streamFn,
+		AfterToolCall: func(ctx context.Context, toolCallID, toolName string, args map[string]any, result *ToolResult) (*ToolResult, error) {
+			return nil, fmt.Errorf("after hook failure")
+		},
+	}
+	messages, err := RunLoop(context.Background(), cfg, []ai.Message{ai.NewUserMessage("go")})
+	if err != nil {
+		t.Fatalf("unexpected loop error: %v", err)
+	}
+	tr, ok := messages[2].(*ai.ToolResultMessage)
+	if !ok {
+		t.Fatalf("expected ToolResultMessage, got %T", messages[2])
+	}
+	if !tr.IsError {
+		t.Error("expected IsError=true when AfterToolCall returns error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P1: Streaming error / abort edge cases
+// ---------------------------------------------------------------------------
+
+func TestRunLoop_StreamEventError(t *testing.T) {
+	// Stream that emits an error event should surface as an LLM error.
+	streamFn := func(ctx context.Context, model *ai.Model, reqCtx *ai.Context, opts ai.StreamOptions) *ai.EventStream {
+		stream := ai.NewEventStream(16)
+		go func() {
+			errMsg := &ai.AssistantMessage{
+				StopReason:   ai.StopReasonError,
+				ErrorMessage: "upstream provider error",
+			}
+			stream.Push(ai.StreamEvent{Type: ai.EventError, Message: errMsg})
+			stream.End(errMsg)
+		}()
+		return stream
+	}
+	cfg := &Config{
+		Model:      testModel(),
+		StreamFunc: streamFn,
+	}
+	_, err := RunLoop(context.Background(), cfg, []ai.Message{ai.NewUserMessage("hi")})
+	if err == nil {
+		t.Fatal("expected error when stream emits EventError, got nil")
+	}
+}
+
+func TestRunLoop_ContextCancelDuringStream(t *testing.T) {
+	// Context cancelled while streaming should return ctx.Err().
+	ready := make(chan struct{})
+	streamFn := func(ctx context.Context, model *ai.Model, reqCtx *ai.Context, opts ai.StreamOptions) *ai.EventStream {
+		stream := ai.NewEventStream(16)
+		go func() {
+			close(ready) // signal we started
+			<-ctx.Done() // wait for cancellation
+			msg := &ai.AssistantMessage{StopReason: ai.StopReasonAborted}
+			stream.Push(ai.StreamEvent{Type: ai.EventDone, Message: msg, Reason: ai.StopReasonAborted})
+			stream.End(msg)
+		}()
+		return stream
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-ready
+		cancel()
+	}()
+	cfg := &Config{
+		Model:      testModel(),
+		StreamFunc: streamFn,
+	}
+	_, err := RunLoop(ctx, cfg, []ai.Message{ai.NewUserMessage("hi")})
+	if err == nil {
+		t.Fatal("expected error on context cancellation during stream")
+	}
+}

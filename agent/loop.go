@@ -49,7 +49,7 @@ func RunLoop(ctx context.Context, cfg *Config, messages []ai.Message) ([]ai.Mess
 		turns++
 
 		// Inner loop: handles tool calls and steering
-		for {
+		for innerLoopCount := 0; ; innerLoopCount++ {
 			if ctx.Err() != nil {
 				emit(Event{Type: EventAgentEnd, Messages: messages})
 				return messages, ctx.Err()
@@ -83,12 +83,12 @@ func RunLoop(ctx context.Context, cfg *Config, messages []ai.Message) ([]ai.Mess
 				Tools:        tools,
 			}
 
-			opts := ai.StreamOptions{
-				Thinking: cfg.ThinkingLevel,
-				APIKey:   cfg.APIKey,
-			}
+		opts := ai.StreamOptions{
+			Thinking: cfg.ThinkingLevel,
+			APIKey:   cfg.APIKey,
+		}
 
-			// Stream LLM response
+		// Stream LLM response
 			partial := &ai.AssistantMessage{
 				API:       cfg.Model.API,
 				Provider:  cfg.Model.Provider,
@@ -160,26 +160,52 @@ func RunLoop(ctx context.Context, cfg *Config, messages []ai.Message) ([]ai.Mess
 					continue
 				}
 
+				// Run BeforeToolCall hooks (global then per-tool)
+				execArgs := tc.Arguments
+				var shortCircuit *ToolResult
+				if shortCircuit == nil {
+					if sr, replaceArgs, err2 := runBeforeHooks(ctx, cfg, tool, tc.ID, tc.Name, execArgs); err2 != nil {
+						shortCircuit = ErrorResult(fmt.Sprintf("BeforeToolCall error: %v", err2))
+					} else if sr != nil {
+						shortCircuit = sr
+					} else if replaceArgs != nil {
+						execArgs = replaceArgs
+					}
+				}
+
 				emit(Event{
 					Type:       EventToolExecStart,
 					ToolCallID: tc.ID,
 					ToolName:   tc.Name,
-					ToolArgs:   tc.Arguments,
+					ToolArgs:   execArgs,
 				})
 
-				// Execute the tool
-				toolResult, err := tool.Execute(ctx, tc.ID, tc.Arguments, func(update ToolUpdate) {
-					emit(Event{
-						Type:       EventToolExecUpdate,
-						ToolCallID: tc.ID,
-						ToolName:   tc.Name,
-						ToolArgs:   tc.Arguments,
-						ToolUpdate: &update,
+				var toolResult *ToolResult
+				if shortCircuit != nil {
+					// Hook blocked execution
+					toolResult = shortCircuit
+				} else {
+					// Execute the tool
+					var err error
+					toolResult, err = tool.Execute(ctx, tc.ID, execArgs, func(update ToolUpdate) {
+						emit(Event{
+							Type:       EventToolExecUpdate,
+							ToolCallID: tc.ID,
+							ToolName:   tc.Name,
+							ToolArgs:   execArgs,
+							ToolUpdate: &update,
+						})
 					})
-				})
+					if err != nil {
+						toolResult = ErrorResult(fmt.Sprintf("Tool execution error: %v", err))
+					}
 
-				if err != nil {
-					toolResult = ErrorResult(fmt.Sprintf("Tool execution error: %v", err))
+					// Run AfterToolCall hooks (per-tool then global)
+					if transformed, err2 := runAfterHooks(ctx, cfg, tool, tc.ID, tc.Name, execArgs, toolResult); err2 != nil {
+						toolResult = ErrorResult(fmt.Sprintf("AfterToolCall error: %v", err2))
+					} else if transformed != nil {
+						toolResult = transformed
+					}
 				}
 
 				emit(Event{
@@ -236,6 +262,107 @@ func RunLoop(ctx context.Context, cfg *Config, messages []ai.Message) ([]ai.Mess
 		emit(Event{Type: EventAgentEnd, Messages: messages})
 		return messages, nil
 	}
+}
+
+// runBeforeHooks runs the global BeforeToolCall and per-tool BeforeExecute hooks in order.
+// Returns (shortCircuitResult, replacementArgs, error).
+// shortCircuitResult non-nil means skip tool execution.
+// replacementArgs non-nil means replace tc.Arguments before execution.
+func runBeforeHooks(ctx context.Context, cfg *Config, tool *AgentTool, toolCallID, toolName string, args map[string]any) (*ToolResult, map[string]any, error) {
+	var replaceArgs map[string]any
+
+	// 1. Global hook
+	if cfg.BeforeToolCall != nil {
+		res, err := cfg.BeforeToolCall(ctx, toolCallID, toolName, args)
+		if err != nil {
+			return nil, nil, err
+		}
+		if res != nil {
+			switch res.Action {
+			case ToolCallDeny:
+				if res.DenyResult != nil {
+					return res.DenyResult, nil, nil
+				}
+				return ErrorResult(fmt.Sprintf("tool call denied: %s", toolName)), nil, nil
+			case ToolCallProvideResult:
+				if res.ProvidedResult != nil {
+					return res.ProvidedResult, nil, nil
+				}
+				return ErrorResult("tool call intercepted: no result provided"), nil, nil
+			default: // ToolCallAllow or zero value
+				if res.ReplaceArgs != nil {
+					replaceArgs = res.ReplaceArgs
+				}
+			}
+		}
+	}
+
+	// Merge replaceArgs for per-tool hook
+	effectiveArgs := args
+	if replaceArgs != nil {
+		effectiveArgs = replaceArgs
+	}
+
+	// 2. Per-tool hook
+	if tool.BeforeExecute != nil {
+		res, err := tool.BeforeExecute(ctx, toolCallID, effectiveArgs)
+		if err != nil {
+			return nil, nil, err
+		}
+		if res != nil {
+			switch res.Action {
+			case ToolCallDeny:
+				if res.DenyResult != nil {
+					return res.DenyResult, nil, nil
+				}
+				return ErrorResult(fmt.Sprintf("tool call denied: %s", toolName)), nil, nil
+			case ToolCallProvideResult:
+				if res.ProvidedResult != nil {
+					return res.ProvidedResult, nil, nil
+				}
+				return ErrorResult("tool call intercepted: no result provided"), nil, nil
+			default: // ToolCallAllow or zero value
+				if res.ReplaceArgs != nil {
+					replaceArgs = res.ReplaceArgs
+				}
+			}
+		}
+	}
+
+	return nil, replaceArgs, nil
+}
+
+// runAfterHooks runs the per-tool AfterExecute and global AfterToolCall hooks in order.
+// Returns the (possibly transformed) result, or nil to keep the original.
+func runAfterHooks(ctx context.Context, cfg *Config, tool *AgentTool, toolCallID, toolName string, args map[string]any, result *ToolResult) (*ToolResult, error) {
+	current := result
+
+	// 1. Per-tool hook
+	if tool.AfterExecute != nil {
+		transformed, err := tool.AfterExecute(ctx, toolCallID, args, current)
+		if err != nil {
+			return nil, err
+		}
+		if transformed != nil {
+			current = transformed
+		}
+	}
+
+	// 2. Global hook
+	if cfg.AfterToolCall != nil {
+		transformed, err := cfg.AfterToolCall(ctx, toolCallID, toolName, args, current)
+		if err != nil {
+			return nil, err
+		}
+		if transformed != nil {
+			current = transformed
+		}
+	}
+
+	if current == result {
+		return nil, nil // no change
+	}
+	return current, nil
 }
 
 // findTool looks up a tool by name.
